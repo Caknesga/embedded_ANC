@@ -1,69 +1,109 @@
 #include <stdio.h>
-#include <stdbool.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
+#include "driver/i2s.h"
 #include "driver/gpio.h"
-#include "esp_adc/adc_oneshot.h"
+#include "esp_log.h"
 
-#define LED_GPIO      GPIO_NUM_9
-#define ADC_UNIT      ADC_UNIT_1
-#define ADC_CH        ADC_CHANNEL_2   // GPIO2 (A0)
-#define CLAP_THRESH   200              // tune this
-#define SILENCE_THRESH 80              // must be lower
+// ================= CONFIG =================
+#define TAG "RAM_REC"
 
+// I2S pins (your wiring)
+#define I2S_BCLK   GPIO_NUM_6
+#define I2S_WS     GPIO_NUM_7
+#define I2S_SD     GPIO_NUM_21
+
+// LED
+#define LED_GPIO   GPIO_NUM_9
+
+// Audio
+#define SAMPLE_RATE     16000
+#define RECORD_SECONDS  2
+#define NUM_SAMPLES     (SAMPLE_RATE * RECORD_SECONDS)
+
+// I2S
+#define I2S_PORT I2S_NUM_0
+// ==========================================
+
+static int16_t audio_buffer[NUM_SAMPLES];
+
+// ---------- LED ----------
+static void led_init(void)
+{
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << LED_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = 0,
+        .pull_down_en = 0,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&cfg);
+    gpio_set_level(LED_GPIO, 0);
+}
+
+// ---------- I2S ----------
+static void i2s_init(void)
+{
+    i2s_config_t i2s_config = {
+        .mode = I2S_MODE_MASTER | I2S_MODE_RX,
+        .sample_rate = SAMPLE_RATE,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .communication_format = I2S_COMM_FORMAT_I2S,
+        .dma_buf_count = 4,
+        .dma_buf_len = 256,
+        .use_apll = false,
+        .tx_desc_auto_clear = false,
+        .fixed_mclk = 0
+    };
+
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_BCLK,
+        .ws_io_num = I2S_WS,
+        .data_out_num = I2S_PIN_NO_CHANGE,
+        .data_in_num = I2S_SD
+    };
+
+    i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+    i2s_set_pin(I2S_PORT, &pin_config);
+    i2s_zero_dma_buffer(I2S_PORT);
+}
+
+// ---------- MAIN ----------
 void app_main(void)
 {
-    // ---- LED ----
-    gpio_reset_pin(LED_GPIO);
-    gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
-    gpio_set_level(LED_GPIO, 0);
+    esp_log_level_set("*", ESP_LOG_NONE); // keep serial clean
 
-    // ---- ADC ----
-    adc_oneshot_unit_handle_t adc_handle;
-    adc_oneshot_unit_init_cfg_t unit_cfg = {
-        .unit_id = ADC_UNIT
-    };
-    adc_oneshot_new_unit(&unit_cfg, &adc_handle);
+    led_init();
+    i2s_init();
 
-    adc_oneshot_chan_cfg_t chan_cfg = {
-        .bitwidth = ADC_BITWIDTH_12,
-        .atten = ADC_ATTEN_DB_11
-    };
-    adc_oneshot_config_channel(adc_handle, ADC_CH, &chan_cfg);
+    // -------- RECORD --------
+    gpio_set_level(LED_GPIO, 1);   // LED ON (recording)
 
-    // ---- Baseline ----
-    int baseline = 0, raw;
-    for (int i = 0; i < 200; i++) {
-        adc_oneshot_read(adc_handle, ADC_CH, &raw);
-        baseline += raw;
-        vTaskDelay(pdMS_TO_TICKS(5));
+    size_t bytes_read;
+    int32_t sample32;
+
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        i2s_read(I2S_PORT,
+                 &sample32,
+                 sizeof(sample32),
+                 &bytes_read,
+                 portMAX_DELAY);
+
+        // INMP441: 24-bit left-aligned → int16
+        audio_buffer[i] = (int16_t)(sample32 >> 16);
     }
-    baseline /= 200;
 
-    // ---- State ----
-    bool led_on = false;
-    bool clap_ready = true;
+    gpio_set_level(LED_GPIO, 0);   // LED OFF (recording done)
 
+    // -------- DUMP --------
+    // CSV-like (one sample per line)
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        printf("%d\n", audio_buffer[i]);
+    }
+
+    // Idle
     while (1) {
-        adc_oneshot_read(adc_handle, ADC_CH, &raw);
-
-        int diff = raw - baseline;
-        if (diff < 0) diff = -diff;
-
-        // ---- Clap detection (EDGE) ----
-        if (clap_ready && diff > CLAP_THRESH) {
-            led_on = !led_on;
-            gpio_set_level(LED_GPIO, led_on);
-            clap_ready = false;   // block until silence
-        }
-
-        // ---- Re-arm after silence ----
-        if (!clap_ready && diff < SILENCE_THRESH) {
-            clap_ready = true;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(2));  // ~500 Hz sampling
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
