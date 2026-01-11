@@ -21,7 +21,7 @@ while True:
 
 print("Connected. Reset ESP32 to start capture.")
 
-with open("audio12.txt", "w") as f:
+with open("audio14.txt", "w") as f:
     while True:
         try:
             if ser.in_waiting:

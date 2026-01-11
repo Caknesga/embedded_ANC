@@ -5,7 +5,7 @@ SAMPLE_RATE = 16000
 samples = []
 
 # -------- LOAD SAMPLES --------
-with open("audio12.txt", "r", errors="ignore") as f:
+with open("audio14.txt", "r", errors="ignore") as f:
     for line in f:
         line = line.strip()
         if not line:
@@ -29,7 +29,7 @@ if peak > 0:
     samples = [int(s * gain) for s in samples]
 
 # -------- WRITE WAV --------
-wav = wave.open("audio12.wav", "w")
+wav = wave.open("audio14.wav", "w")
 wav.setnchannels(1)
 wav.setsampwidth(2)      # 16-bit PCM
 wav.setframerate(SAMPLE_RATE)

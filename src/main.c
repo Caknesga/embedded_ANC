@@ -4,44 +4,31 @@
 #include "driver/i2s.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
-
+#include "driver/uart.h"
+#include <unistd.h>
 // ================= CONFIG =================
-#define TAG "RAM_REC"
+#define TAG "ESP32_AUDIO_USB"
 
-// I2S pins (your wiring)
+// GPIO pins for INMP441
 #define I2S_BCLK   GPIO_NUM_6
 #define I2S_WS     GPIO_NUM_7
 #define I2S_SD     GPIO_NUM_21
 
-// LED
-#define LED_GPIO   GPIO_NUM_9
-
 // Audio
-#define SAMPLE_RATE     16000
-#define RECORD_SECONDS  2
-#define NUM_SAMPLES     (SAMPLE_RATE * RECORD_SECONDS)
+#define SAMPLE_RATE    16000
+#define FRAME_SAMPLES  256
 
 // I2S
 #define I2S_PORT I2S_NUM_0
-// ==========================================
+// =========================================
 
-static int16_t audio_buffer[NUM_SAMPLES];
+// I2S raw buffer
+static int32_t i2s_rx_buffer[FRAME_SAMPLES];
 
-// ---------- LED ----------
-static void led_init(void)
-{
-    gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << LED_GPIO),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = 0,
-        .pull_down_en = 0,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&cfg);
-    gpio_set_level(LED_GPIO, 0);
-}
+// Audio frame to send
+static int16_t audio_frame[FRAME_SAMPLES];
 
-// ---------- I2S ----------
+// ---------- I2S INIT ----------
 static void i2s_init(void)
 {
     i2s_config_t i2s_config = {
@@ -51,7 +38,7 @@ static void i2s_init(void)
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
         .communication_format = I2S_COMM_FORMAT_I2S,
         .dma_buf_count = 4,
-        .dma_buf_len = 256,
+        .dma_buf_len = FRAME_SAMPLES,
         .use_apll = false,
         .tx_desc_auto_clear = false,
         .fixed_mclk = 0
@@ -64,46 +51,42 @@ static void i2s_init(void)
         .data_in_num = I2S_SD
     };
 
-    i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
-    i2s_set_pin(I2S_PORT, &pin_config);
-    i2s_zero_dma_buffer(I2S_PORT);
+    ESP_ERROR_CHECK(i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL));
+    ESP_ERROR_CHECK(i2s_set_pin(I2S_PORT, &pin_config));
+    ESP_ERROR_CHECK(i2s_zero_dma_buffer(I2S_PORT));
 }
 
 // ---------- MAIN ----------
 void app_main(void)
 {
-    esp_log_level_set("*", ESP_LOG_NONE); // keep serial clean
+    esp_log_level_set("*", ESP_LOG_NONE);
 
-    led_init();
     i2s_init();
 
-    // -------- RECORD --------
-    gpio_set_level(LED_GPIO, 1);   // LED ON (recording)
-
     size_t bytes_read;
-    int32_t sample32;
 
-    for (int i = 0; i < NUM_SAMPLES; i++) {
-        i2s_read(I2S_PORT,
-                 &sample32,
-                 sizeof(sample32),
-                 &bytes_read,
-                 portMAX_DELAY);
-
-        // INMP441: 24-bit left-aligned → int16
-        audio_buffer[i] = (int16_t)(sample32 >> 16);
-    }
-
-    gpio_set_level(LED_GPIO, 0);   // LED OFF (recording done)
-
-    // -------- DUMP --------
-    // CSV-like (one sample per line)
-    for (int i = 0; i < NUM_SAMPLES; i++) {
-        printf("%d\n", audio_buffer[i]);
-    }
-
-    // Idle
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Read I2S frame
+        esp_err_t err = i2s_read(
+            I2S_PORT,
+            i2s_rx_buffer,
+            sizeof(i2s_rx_buffer),
+            &bytes_read,
+            portMAX_DELAY
+        );
+
+        if (err != ESP_OK || bytes_read == 0) {
+            continue;
+        }
+
+        int samples = bytes_read / sizeof(int32_t);
+
+        // Convert to int16
+        for (int i = 0; i < samples; i++) {
+            audio_frame[i] = (int16_t)(i2s_rx_buffer[i] >> 16);
+        }
+
+        // 🔥 Send raw audio via USB CDC (stdout)
+        write(STDOUT_FILENO, audio_frame, samples * sizeof(int16_t));
     }
 }
